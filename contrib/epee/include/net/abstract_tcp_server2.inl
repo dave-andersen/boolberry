@@ -131,7 +131,7 @@ DISABLE_VS_WARNINGS(4355)
 
     if(is_income && m_pfilter && !m_pfilter->is_remote_ip_allowed(context.m_remote_ip))
     {
-      LOG_PRINT_L0("[sock " << socket_.native_handle() << "] ip denied " << string_tools::get_ip_string_from_int32(context.m_remote_ip) << ", shutdowning connection");
+      LOG_PRINT_L0("[sock " << socket_.native_handle() << "] ip denied " << string_tools::get_ip_string_from_int32(context.m_remote_ip) << ", shutting down connection");
       close();
       return false;
     }
