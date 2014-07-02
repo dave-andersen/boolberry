@@ -64,7 +64,7 @@ target_link_libraries(simplewallet wallet rpc currency_core crypto common ${CMAK
 
 add_executable(simpleminer ${SIMPLEMINER})
 add_dependencies(simpleminer version)
-target_link_libraries(simpleminer currency_core crypto common ${CMAKE_THREAD_LIBS_INIT} ${Boost_LIBRARIES})
+target_link_libraries(simpleminer currency_core crypto common ${CMAKE_THREAD_LIBS_INIT} ${Boost_LIBRARIES} ${OPENCL_LIBRARIES})
 
 set_property(TARGET common crypto currency_core rpc wallet PROPERTY FOLDER "libs")
 set_property(TARGET daemon simplewallet simpleminer connectivity_tool PROPERTY FOLDER "prog")

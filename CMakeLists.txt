@@ -25,6 +25,10 @@ if (UNIX AND NOT APPLE)
   find_package(Threads REQUIRED)
 endif()
 
+SET(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/src/cmake)
+find_package(OpenCL)
+include_directories(${OPENCL_INCLUDE_DIRS})
+
 
 if(MSVC)
   add_definitions("/bigobj /MP /W3 /GS- /D_CRT_SECURE_NO_WARNINGS /wd4996 /wd4345 /D_WIN32_WINNT=0x0600 /DWIN32_LEAN_AND_MEAN /DGTEST_HAS_TR1_TUPLE=0 /FIinline_c.h /D__SSE4_1__")
