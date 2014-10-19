@@ -70,6 +70,21 @@ namespace tools
     return true;
   }
   //------------------------------------------------------------------------------------------------------------------------------
+  bool wallet_rpc_server::on_getaddress(const wallet_rpc::COMMAND_RPC_GET_ADDRESS::request& req, wallet_rpc::COMMAND_RPC_GET_ADDRESS::response& res, epee::json_rpc::error& er, connection_context& cntx)
+  {
+    try
+    {
+      res.address = m_wallet.get_account().get_public_address_str();
+    }
+    catch (std::exception& e)
+    {
+      er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
+      er.message = e.what();
+      return false;
+    }
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
   bool wallet_rpc_server::on_transfer(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req, wallet_rpc::COMMAND_RPC_TRANSFER::response& res, epee::json_rpc::error& er, connection_context& cntx)
   {
 
@@ -77,7 +92,7 @@ namespace tools
     for (auto it = req.destinations.begin(); it != req.destinations.end(); it++) 
     {
       currency::tx_destination_entry de;
-      if(!get_account_address_from_str(de.addr, it->address))
+      if(!m_wallet.get_transfer_address(it->address, de.addr))
       {
         er.code = WALLET_RPC_ERROR_CODE_WRONG_ADDRESS;
         er.message = std::string("WALLET_RPC_ERROR_CODE_WRONG_ADDRESS: ") + it->address;
@@ -173,3 +188,6 @@ namespace tools
   }
   //------------------------------------------------------------------------------------------------------------------------------
 }
+
+
+

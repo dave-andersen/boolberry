@@ -49,17 +49,20 @@ public:
   bool generate_wallet(const std::string& path, const std::string& password);
   bool close_wallet();
   bool transfer(const view::transfer_params& tp, currency::transaction& res_tx);
+  bool get_aliases(view::alias_set& al_set);
+  std::string get_config_folder();
 private:
   void main_worker(const po::variables_map& vm);
   bool update_state_info();
   bool update_wallets();
   void loop();
   bool update_wallet_info();
+  bool load_recent_transfers();
+  bool get_transfer_address(const std::string& adr_str, currency::account_public_address& addr);
 
   //----- tools::i_wallet2_callback ------
   virtual void on_new_block(uint64_t height, const currency::block& block);
-  virtual void on_money_received2(const currency::block& /*b*/, const currency::transaction& /*tx*/, uint64_t /*amount*/, const tools::money_transfer2_details& td);
-  virtual void on_money_spent2(const currency::block& /*b*/, const currency::transaction& /*in_tx*/, uint64_t /*amount*/, const tools::money_transfer2_details& td);
+  virtual void on_transfer2(const tools::wallet_rpc::wallet_transfer_info& wti);
 
   std::thread m_main_worker_thread;
   std::atomic<bool> m_stop_singal_sent;
@@ -70,6 +73,7 @@ private:
   std::unique_ptr<tools::wallet2> m_wallet;
   std::atomic<uint64_t> m_last_daemon_height;
   std::atomic<uint64_t> m_last_wallet_synch_height;
+  std::string m_data_dir;
 
   //daemon stuff
   currency::core m_ccore;

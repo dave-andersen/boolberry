@@ -38,7 +38,7 @@ namespace
   const command_line::arg_descriptor<std::string> arg_daemon_address = {"daemon-address", "Use daemon instance at <host>:<port>", ""};
   const command_line::arg_descriptor<std::string> arg_daemon_host = {"daemon-host", "Use daemon instance at host <arg> instead of localhost", ""};
   const command_line::arg_descriptor<std::string> arg_password = {"password", "Wallet password", "", true};
-  const command_line::arg_descriptor<int> arg_daemon_port = {"daemon-port", "Use daemon instance at port <arg> instead of 8081", 0};
+  const command_line::arg_descriptor<int> arg_daemon_port = {"daemon-port", "Use daemon instance at port <arg> instead of default", 0};
   const command_line::arg_descriptor<uint32_t> arg_log_level = {"set_log", "", 0, true};
 
   const command_line::arg_descriptor< std::vector<std::string> > arg_command = {"command", ""};
@@ -170,9 +170,10 @@ simple_wallet::simple_wallet()
   m_cmd_binder.set_handler("refresh", boost::bind(&simple_wallet::refresh, this, _1), "Resynchronize transactions and balance");
   m_cmd_binder.set_handler("balance", boost::bind(&simple_wallet::show_balance, this, _1), "Show current wallet balance");
   m_cmd_binder.set_handler("incoming_transfers", boost::bind(&simple_wallet::show_incoming_transfers, this, _1), "incoming_transfers [available|unavailable] - Show incoming transfers - all of them or filter them by availability");
+  m_cmd_binder.set_handler("list_recent_transfers", boost::bind(&simple_wallet::list_recent_transfers, this, _1), "list_recent_transfers - Show recent maximum 1000 transfers");
   m_cmd_binder.set_handler("payments", boost::bind(&simple_wallet::show_payments, this, _1), "payments <payment_id_1> [<payment_id_2> ... <payment_id_N>] - Show payments <payment_id_1>, ... <payment_id_N>");
   m_cmd_binder.set_handler("bc_height", boost::bind(&simple_wallet::show_blockchain_height, this, _1), "Show blockchain height");
-  m_cmd_binder.set_handler("transfer", boost::bind(&simple_wallet::transfer, this, _1), "transfer <mixin_count> <addr_1> <amount_1> [<addr_2> <amount_2> ... <addr_N> <amount_N>] - Transfer <amount_1>,... <amount_N> to <address_1>,... <address_N>, respectively. <mixin_count> is the number of transactions yours is indistinguishable from (from 0 to maximum available)");
+  m_cmd_binder.set_handler("transfer", boost::bind(&simple_wallet::transfer, this, _1), "transfer <mixin_count> <addr_1> <amount_1> [<addr_2> <amount_2> ... <addr_N> <amount_N>] [payment_id] - Transfer <amount_1>,... <amount_N> to <address_1>,... <address_N>, respectively. <mixin_count> is the number of transactions yours is indistinguishable from (from 0 to maximum available)");
   m_cmd_binder.set_handler("set_log", boost::bind(&simple_wallet::set_log, this, _1), "set_log <level> - Change current log detalization level, <level> is a number 0-4");
   m_cmd_binder.set_handler("address", boost::bind(&simple_wallet::print_address, this, _1), "Show current wallet public address");
   m_cmd_binder.set_handler("save", boost::bind(&simple_wallet::save, this, _1), "Save wallet synchronized data");
@@ -525,6 +526,51 @@ bool simple_wallet::show_balance(const std::vector<std::string>& args/* = std::v
   return true;
 }
 //----------------------------------------------------------------------------------------------------
+bool print_wti(const tools::wallet_rpc::wallet_transfer_info& wti)
+{
+  epee::log_space::console_colors cl;
+  if (wti.is_income)
+    cl = epee::log_space::console_color_green;
+  else
+    cl = epee::log_space::console_color_magenta;
+
+  std::string payment_id_placeholder;
+  if (wti.payment_id.size())
+    payment_id_placeholder = std::string("(payment_id:") + wti.payment_id + ")";
+
+  message_writer(cl) << epee::misc_utils::get_time_str_v2(wti.timestamp) << " "
+    << (wti.is_income ? "Received " : "Sent    ")
+    << print_money(wti.amount) << "(fee:" << print_money(wti.fee) << ")  "
+    << (wti.recipient_alias.size() ? wti.recipient_alias : wti.recipient)
+    << " " << wti.tx_hash << payment_id_placeholder;
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::list_recent_transfers(const std::vector<std::string>& args)
+{
+  std::vector<tools::wallet_rpc::wallet_transfer_info> unconfirmed;
+  std::vector<tools::wallet_rpc::wallet_transfer_info> recent;
+  m_wallet->get_recent_transfers_history(recent, 0, 1000);
+  m_wallet->get_unconfirmed_transfers(unconfirmed);
+  //workaround for missed fee
+  
+  success_msg_writer() << "Unconfirmed transfers: ";
+  for (auto & wti : unconfirmed)
+  {
+    if (!wti.fee)
+      wti.fee = currency::get_tx_fee(wti.tx);
+    print_wti(wti);
+  }
+  success_msg_writer() << "Recent transfers: ";
+  for (auto & wti : recent)
+  {
+    if (!wti.fee)
+      wti.fee = currency::get_tx_fee(wti.tx);
+    print_wti(wti);
+  }
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
 bool simple_wallet::show_incoming_transfers(const std::vector<std::string>& args)
 {
   bool filter = false;
@@ -656,70 +702,6 @@ bool simple_wallet::show_blockchain_height(const std::vector<std::string>& args)
   return true;
 }
 //----------------------------------------------------------------------------------------------------
-bool simple_wallet::get_alias_from_daemon(const std::string& alias_name, currency::alias_info_base& ai)
-{
-  COMMAND_RPC_GET_ALIAS_DETAILS::request req = AUTO_VAL_INIT(req);
-  COMMAND_RPC_GET_ALIAS_DETAILS::response res = AUTO_VAL_INIT(res);
-
-  req.alias = alias_name;
-  bool r = net_utils::invoke_http_json_rpc(m_daemon_address + "/json_rpc", "get_alias_details", req, res, m_http_client);
-  if(!r)
-  {
-    LOG_PRINT_RED_L0("Failed to invoke get_alias_details rpc");
-    return false;
-  }
-  if(res.status != CORE_RPC_STATUS_OK)
-  {
-    LOG_PRINT_RED_L0("Failed to invoke get_alias_details rpc: core status: " << res.status);
-    return false;
-  }
-
-  if(!currency::get_account_address_from_str(ai.m_address, res.alias_details.address))
-  {
-    LOG_PRINT_RED_L0("Failed to parse get_alias_details response: address " << res.alias_details.address);
-    return false;
-  }
-
-  if(res.alias_details.tracking_key.size())
-  {
-    if(!string_tools::parse_tpod_from_hex_string(res.alias_details.tracking_key, ai.m_view_key))
-    {
-      LOG_PRINT_RED_L0("Failed to parse get_alias_details response: address " << res.alias_details.address);
-      return false;
-    }
-  }
-  ai.m_text_comment = res.alias_details.comment;
-  return true;
-}
-//----------------------------------------------------------------------------------------------------
-bool simple_wallet::get_transfer_address(const std::string& adr_str, currency::account_public_address& addr)
-{
-  if(!adr_str.size())
-    return false;
-
-  if(adr_str[0] == '@')
-  {
-    //referred by alias name
-    if(adr_str.size() < 2)
-      return false;
-    std::string pure_alias_name = adr_str.substr(1);
-    CHECK_AND_ASSERT_MES(validate_alias_name(pure_alias_name), false, "wrong name set in transfer command");
-
-
-    currency::alias_info_base ai = AUTO_VAL_INIT(ai);
-    if(!get_alias_from_daemon(pure_alias_name, ai))
-      return false;
-    addr = ai.m_address;
-    return true;
-  }
-
-  if(!get_account_address_from_str(addr, adr_str))
-  {
-    return false;
-  }
-  return true;
-}
-//----------------------------------------------------------------------------------------------------
 bool simple_wallet::transfer(const std::vector<std::string> &args_)
 {
   if (!try_connect_to_daemon())
@@ -764,7 +746,7 @@ bool simple_wallet::transfer(const std::vector<std::string> &args_)
   for (size_t i = 0; i < local_args.size(); i += 2) 
   {
     currency::tx_destination_entry de;
-    if(!get_transfer_address(local_args[i], de.addr))
+    if(!m_wallet->get_transfer_address(local_args[i], de.addr))
     {
       fail_msg_writer() << "wrong address: " << local_args[i];
       return true;
@@ -874,7 +856,7 @@ bool simple_wallet::transfer(const std::vector<std::string> &args_)
 bool simple_wallet::run()
 {
   std::string addr_start = m_wallet->get_account().get_public_address_str().substr(0, 6);
-  return m_cmd_binder.run_handling("[wallet " + addr_start + "]: ", "");
+  return m_cmd_binder.run_handling("[" CURRENCY_NAME_BASE " wallet " + addr_start + "]: ", "");
 }
 //----------------------------------------------------------------------------------------------------
 void simple_wallet::stop()
@@ -1041,14 +1023,20 @@ int main(int argc, char* argv[])
 
     std::vector<std::string> command = command_line::get_arg(vm, arg_command);
     if (!command.empty())
+    {
       w.process_command(command);
-
-    tools::signal_handler::install([&w] {
       w.stop();
-    });
-    w.run();
+      w.deinit();
+    }
+    else
+    {
+      tools::signal_handler::install([&w] {
+        w.stop();
+      });
+      w.run();
 
-    w.deinit();
+      w.deinit();
+    }
   }
   return 1;
   //CATCH_ENTRY_L0("main", 1);

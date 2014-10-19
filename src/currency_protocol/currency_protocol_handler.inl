@@ -104,22 +104,44 @@ namespace currency
 
     if(m_core.have_block(hshd.top_id))  
     {
+
       context.m_state = currency_connection_context::state_normal;
       if(is_inital)
         on_connection_synchronized();
       return true;
     }
 
-    LOG_PRINT_CCONTEXT_YELLOW("Sync data returned unknown top block: " << m_core.get_current_blockchain_height() << "->" << hshd.current_height 
-      << "[" << static_cast<int64_t>(hshd.current_height - m_core.get_current_blockchain_height()) << " blocks(" << (hshd.current_height - m_core.get_current_blockchain_height()) /720 << " days) behind] " << ENDL 
-      << "remote top: "  << hshd.top_id << "[" << hshd.current_height << "]" << ", set SYNCHRONIZATION mode", (is_inital ? LOG_LEVEL_0:LOG_LEVEL_1));
+    int64_t diff = static_cast<int64_t>(hshd.current_height) - static_cast<int64_t>(m_core.get_current_blockchain_height());
+    LOG_PRINT_CCONTEXT_YELLOW("Sync data returned unknown top block: " << m_core.get_current_blockchain_height() << " -> " << hshd.current_height
+      << " [" << std::abs(diff) << " blocks (" << diff / (24 * 60 * 60 / DIFFICULTY_TARGET) << " days) "
+      << (0 <= diff ? std::string("behind") : std::string("ahead"))
+      << "] " << ENDL << "SYNCHRONIZATION started", (is_inital ? LOG_LEVEL_0:LOG_LEVEL_1));
+    LOG_PRINT_L1("Remote top block height: " << hshd.current_height << ", id: " << hshd.top_id);
+
+    /*check if current height is in remote's checkpoints zone*/
+    if(hshd.last_checkpoint_height 
+      && m_core.get_blockchain_storage().get_checkpoints().get_top_checkpoint_height() < hshd.last_checkpoint_height 
+      && m_core.get_current_blockchain_height() < hshd.last_checkpoint_height )
+    {
+      LOG_PRINT_CCONTEXT_RED("Remote node have longer checkpoints zone( " << hshd.last_checkpoint_height <<  ") " << 
+        "that local (" << m_core.get_blockchain_storage().get_checkpoints().get_top_checkpoint_height() << ")" <<
+        "That means that current software is outdated, please updated it." << 
+        "Current heigh lay under checkpoints on remote host, so it is not possible validate this transactions on local host, disconnecting.", LOG_LEVEL_0);
+      return false;
+    }else if (m_core.get_blockchain_storage().get_checkpoints().get_top_checkpoint_height() < hshd.last_checkpoint_height)
+    {
+      LOG_PRINT_CCONTEXT_MAGENTA("Remote node have longer checkpoints zone( " << hshd.last_checkpoint_height <<  ") " <<
+        "that local (" << m_core.get_blockchain_storage().get_checkpoints().get_top_checkpoint_height() << ")" << 
+        "That means that current software is outdated, please updated it.", LOG_LEVEL_0);
+    }
+
     context.m_state = currency_connection_context::state_synchronizing;
     context.m_remote_blockchain_height = hshd.current_height;
     //let the socket to send response to handshake, but request callback, to let send request data after response
     LOG_PRINT_CCONTEXT_L2("requesting callback");
     ++context.m_callback_request_count;
     m_p2p->request_callback(context);
-    //update progres vars 
+    //update progress vars 
     if (m_max_height_seen < hshd.current_height)
       m_max_height_seen = hshd.current_height;
     if (!m_core_inital_height)
@@ -145,6 +167,7 @@ namespace currency
   {
     m_core.get_blockchain_top(hshd.current_height, hshd.top_id);
     hshd.current_height +=1;
+    hshd.last_checkpoint_height = m_core.get_blockchain_storage().get_checkpoints().get_top_checkpoint_height();
     return true;
   }
   //------------------------------------------------------------------------------------------------------------------------  

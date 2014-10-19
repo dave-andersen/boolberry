@@ -39,7 +39,7 @@ namespace currency
 
      //-------------------- i_miner_handler -----------------------
      virtual bool handle_block_found( block& b);
-     virtual bool get_block_template(block& b, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai);
+     virtual bool get_block_template(block& b, const account_public_address& adr, wide_difficulty_type& diffic, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai);
 
 
      miner& get_miner(){return m_miner;}
@@ -48,6 +48,7 @@ namespace currency
      bool set_genesis_block(const block& b);
      bool deinit();
      uint64_t get_current_blockchain_height();
+     std::string get_config_folder();
      bool get_blockchain_top(uint64_t& heeight, crypto::hash& top_id);
      bool get_blocks(uint64_t start_offset, size_t count, std::list<block>& blocks, std::list<transaction>& txs);
      bool get_blocks(uint64_t start_offset, size_t count, std::list<block>& blocks);
@@ -92,7 +93,7 @@ namespace currency
      void on_synchronized();
 
    private:
-     bool add_new_tx(const transaction& tx, const crypto::hash& tx_hash, const crypto::hash& tx_prefix_hash, size_t blob_size, tx_verification_context& tvc, bool keeped_by_block);
+     bool add_new_tx(const transaction& tx, const crypto::hash& tx_hash, const crypto::hash& tx_prefix_hash, tx_verification_context& tvc, bool keeped_by_block);
      bool add_new_tx(const transaction& tx, tx_verification_context& tvc, bool keeped_by_block);
      bool add_new_block(const block& b, block_verification_context& bvc);
      bool load_state_data();
@@ -124,6 +125,7 @@ namespace currency
      std::string m_config_folder;
      currency_protocol_stub m_protocol_stub;
      math_helper::once_a_time_seconds<60*60*12, false> m_store_blockchain_interval;
+     math_helper::once_a_time_seconds<60*60*12, false> m_prune_alt_blocks_interval;
      friend class tx_validate_inputs;
      std::atomic<bool> m_starter_message_showed;
    };

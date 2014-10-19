@@ -942,7 +942,7 @@ namespace currency
 
     for(const auto ch: al)
     {
-      CHECK_AND_ASSERT_MES( alphabet[static_cast<unsigned char>(ch)], false, "Wrong character in alias" << MAX_ALIAS_LEN );
+      CHECK_AND_ASSERT_MES( alphabet[static_cast<unsigned char>(ch)], false, "Wrong character in alias: '" << ch << "'");
     }
     return true;
   }
@@ -1027,10 +1027,7 @@ namespace currency
       std::vector<bool> votes(CURRENCY_DONATIONS_INTERVAL, true);
       uint64_t max_possible_donation_reward = get_donations_anount_for_day(already_donated_coins, votes);
       already_donated_coins += max_possible_donation_reward;
-
     }
-
-
   }
   //------------------------------------------------------------------
   void print_currency_details()
@@ -1172,8 +1169,17 @@ namespace currency
   size_t get_object_blobsize(const transaction& t)
   {
     size_t prefix_blob = get_object_blobsize(static_cast<const transaction_prefix&>(t));
+
+    if(is_coinbase(t))    
+      return prefix_blob;    
+
     for(const auto& in: t.vin)
-      prefix_blob += transaction::get_signature_size(in);
+    {
+      size_t sig_count = transaction::get_signature_size(in);
+      prefix_blob += 64*sig_count;
+      prefix_blob += tools::get_varint_packed_size(sig_count);
+    }
+    prefix_blob += tools::get_varint_packed_size(t.vin.size());
     return prefix_blob;
   }
   //---------------------------------------------------------------

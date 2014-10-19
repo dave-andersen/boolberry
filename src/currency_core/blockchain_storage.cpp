@@ -22,7 +22,7 @@
 #include "common/boost_serialization_helper.h"
 #include "warnings.h"
 #include "crypto/hash.h"
-//#include "serialization/json_archive.h"
+#include "miner_common.h"
 
 using namespace std;
 using namespace epee;
@@ -36,7 +36,8 @@ blockchain_storage::blockchain_storage(tx_memory_pool& tx_pool):m_tx_pool(tx_poo
                                                                 m_is_in_checkpoint_zone(false), 
                                                                 m_donations_account(AUTO_VAL_INIT(m_donations_account)), 
                                                                 m_royalty_account(AUTO_VAL_INIT(m_royalty_account)),
-                                                                m_is_blockchain_storing(false)
+                                                                m_is_blockchain_storing(false), 
+                                                                m_current_pruned_rs_height(0)
 {
   bool r = get_donation_accounts(m_donations_account, m_royalty_account);
   CHECK_AND_ASSERT_THROW_MES(r, "failed to load donation accounts");
@@ -70,6 +71,17 @@ uint64_t blockchain_storage::get_current_blockchain_height()
   return m_blocks.size();
 }
 //------------------------------------------------------------------
+void blockchain_storage::fill_addr_to_alias_dict()
+{
+  for (const auto& a : m_aliases)
+  {
+    if (a.second.size())
+    {
+      m_addr_to_alias[a.second.back().m_address] = a.first;
+    }
+  }
+}
+//------------------------------------------------------------------
 bool blockchain_storage::init(const std::string& config_folder)
 {
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
@@ -97,6 +109,8 @@ bool blockchain_storage::init(const std::string& config_folder)
   uint64_t timestamp_diff = time(NULL) - m_blocks.back().bl.timestamp;
   if(!m_blocks.back().bl.timestamp)
     timestamp_diff = time(NULL) - 1341378000;
+
+  fill_addr_to_alias_dict();
   LOG_PRINT_GREEN("Blockchain initialized. last block: " << m_blocks.size()-1 << ", " << misc_utils::get_time_interval_string(timestamp_diff) <<  " time ago, current difficulty: " << get_difficulty_for_next_block(), LOG_LEVEL_0);
   return true;
 }
@@ -160,6 +174,49 @@ bool blockchain_storage::pop_block_from_blockchain()
   return true;
 }
 //------------------------------------------------------------------
+void blockchain_storage::set_checkpoints(checkpoints&& chk_pts) 
+{
+  m_checkpoints = chk_pts;
+  prune_ring_signatures_if_need();
+}
+//------------------------------------------------------------------
+bool blockchain_storage::prune_ring_signatures(uint64_t height, uint64_t& transactions_pruned, uint64_t& signatures_pruned)
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  CHECK_AND_ASSERT_MES(height < m_blocks.size(), false, "prune_ring_signatures called with wrong parametr " << height << ", m_blocks.size() " << m_blocks.size());
+  for(const auto& h: m_blocks[height].bl.tx_hashes)
+  {
+    auto it = m_transactions.find(h);
+    CHECK_AND_ASSERT_MES(it != m_transactions.end(), false, "failed to find transaction " << h << " in blockchain index, in block on height = " << height);    
+    CHECK_AND_ASSERT_MES(it->second.m_keeper_block_height == height, false, 
+      "failed to validate extra check, it->second.m_keeper_block_height = " << it->second.m_keeper_block_height  << 
+      "is mot equal to height = " << height << " in blockchain index, for block on height = " << height);
+    
+    signatures_pruned += it->second.tx.signatures.size();
+    it->second.tx.signatures.clear();
+    ++transactions_pruned;
+  }
+  return true;
+}
+//------------------------------------------------------------------
+bool blockchain_storage::prune_ring_signatures_if_need()
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  if(m_blocks.size() && m_checkpoints.get_top_checkpoint_height() && m_checkpoints.get_top_checkpoint_height() > m_current_pruned_rs_height)
+  {    
+    LOG_PRINT_CYAN("Starting pruning ring signatues...", LOG_LEVEL_0);
+    uint64_t tx_count = 0, sig_count = 0;
+    for(uint64_t height = m_current_pruned_rs_height; height < m_blocks.size() && height <= m_checkpoints.get_top_checkpoint_height(); height++)
+    {
+      bool res = prune_ring_signatures(height, tx_count, sig_count);
+      CHECK_AND_ASSERT_MES(res, false, "filed to prune_ring_signatures for height = " << height);
+    }
+    m_current_pruned_rs_height = m_checkpoints.get_top_checkpoint_height();
+    LOG_PRINT_CYAN("Transaction pruning finished: " << sig_count << " signatures released in " << tx_count << " transactions.", LOG_LEVEL_0);
+  }
+  return true;
+}
+//------------------------------------------------------------------
 bool blockchain_storage::reset_and_set_genesis_block(const block& b)
 {
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
@@ -184,14 +241,28 @@ bool blockchain_storage::copy_scratchpad(std::vector<crypto::hash>& scr)
   return true;
 }
 //------------------------------------------------------------------
+bool blockchain_storage::copy_scratchpad(std::string& dst)
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  if (m_scratchpad.size())
+  {
+    dst.append(reinterpret_cast<const char*>(&m_scratchpad[0]), m_scratchpad.size() * 32);
+  }
+  return true;
+}
+//------------------------------------------------------------------
 bool blockchain_storage::purge_transaction_keyimages_from_blockchain(const transaction& tx, bool strict_check)
 {
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
     struct purge_transaction_visitor: public boost::static_visitor<bool>
   {
+    blockchain_storage& m_bcs;
     key_images_container& m_spent_keys;
     bool m_strict_check;
-    purge_transaction_visitor(key_images_container& spent_keys, bool strict_check):m_spent_keys(spent_keys), m_strict_check(strict_check){}
+    purge_transaction_visitor(blockchain_storage& bcs, key_images_container& spent_keys, bool strict_check):
+      m_bcs(bcs),
+      m_spent_keys(spent_keys), 
+      m_strict_check(strict_check){}
 
     bool operator()(const txin_to_key& inp) const
     {
@@ -204,6 +275,18 @@ bool blockchain_storage::purge_transaction_keyimages_from_blockchain(const trans
       {
         CHECK_AND_ASSERT_MES(!m_strict_check, false, "purge_block_data_from_blockchain: key image in transaction not found");
       }
+
+      if(inp.key_offsets.size() == 1)
+      {
+        //direct spend detected
+        if(!m_bcs.update_spent_tx_flags_for_input(inp.amount, inp.key_offsets[0], false))
+        {
+          //internal error
+          LOG_PRINT_L0("Failed to  update_spent_tx_flags_for_input");
+          return false;
+        }
+      }
+
       return true;
     }
     bool operator()(const txin_gen& inp) const
@@ -223,7 +306,7 @@ bool blockchain_storage::purge_transaction_keyimages_from_blockchain(const trans
 
   BOOST_FOREACH(const txin_v& in, tx.vin)
   {
-    bool r = boost::apply_visitor(purge_transaction_visitor(m_spent_keys, strict_check), in);
+    bool r = boost::apply_visitor(purge_transaction_visitor(*this, m_spent_keys, strict_check), in);
     CHECK_AND_ASSERT_MES(!strict_check || r, false, "failed to process purge_transaction_visitor");
   }
   return true;
@@ -266,10 +349,6 @@ bool blockchain_storage::purge_block_data_from_blockchain(const block& bl, size_
   }
 
   res = purge_transaction_from_blockchain(get_transaction_hash(bl.miner_tx)) && res;
-
-  //purge scratchpad
-
-
   return res;
 }
 //------------------------------------------------------------------
@@ -380,11 +459,11 @@ void blockchain_storage::get_all_known_block_ids(std::list<crypto::hash> &main, 
     invalid.push_back(v.first);
 }
 //------------------------------------------------------------------
-difficulty_type blockchain_storage::get_difficulty_for_next_block()
+wide_difficulty_type blockchain_storage::get_difficulty_for_next_block()
 {
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
   std::vector<uint64_t> timestamps;
-  std::vector<difficulty_type> commulative_difficulties;
+  std::vector<wide_difficulty_type> commulative_difficulties;
   size_t offset = m_blocks.size() - std::min(m_blocks.size(), static_cast<size_t>(DIFFICULTY_BLOCKS_COUNT));
   if(!offset)
     ++offset;//skip genesis block
@@ -482,10 +561,10 @@ bool blockchain_storage::switch_to_alternative_blockchain(std::list<blocks_ext_b
   return true;
 }
 //------------------------------------------------------------------
-difficulty_type blockchain_storage::get_next_difficulty_for_alternative_chain(const std::list<blocks_ext_by_hash::iterator>& alt_chain, block_extended_info& bei)
+wide_difficulty_type blockchain_storage::get_next_difficulty_for_alternative_chain(const std::list<blocks_ext_by_hash::iterator>& alt_chain, block_extended_info& bei)
 {
   std::vector<uint64_t> timestamps;
-  std::vector<difficulty_type> commulative_difficulties;
+  std::vector<wide_difficulty_type> commulative_difficulties;
   if(alt_chain.size()< DIFFICULTY_BLOCKS_COUNT)
   {
     CRITICAL_REGION_LOCAL(m_blockchain_lock);
@@ -676,23 +755,6 @@ bool blockchain_storage::validate_miner_transaction(const block& b, size_t cumul
     return false;
   }  
 
-  //check donation value if set
-  /*if(donation)
-  {
-    if(donation + royalty > max_donation) 
-    {
-      LOG_ERROR("coinbase transaction gives too big donation: d" << print_money(donation) << " + r" << print_money(royalty) << ", expected maximum: " << max_donation);
-      return false;
-    }
-    uint64_t expected_donation = 0; 
-    uint64_t expected_royalty = 0;
-    get_donation_parts(donation + royalty, expected_royalty, expected_donation);
-    if(expected_royalty != royalty || expected_donation != donation) 
-    {
-      LOG_ERROR("coinbase transaction have wrong donation values, donation: " << print_money(donation) << " royalty: " << print_money(royalty) << ", expected donation: " << expected_donation << ", expected royalty: " << expected_royalty);
-      return false;
-    }
-  }*/
   donation_total = royalty + donation;
   return true;
 }
@@ -722,7 +784,7 @@ uint64_t blockchain_storage::get_current_comulative_blocksize_limit()
   return m_current_block_cumul_sz_limit;
 }
 //------------------------------------------------------------------
-bool blockchain_storage::create_block_template(block& b, const account_public_address& miner_address, difficulty_type& diffic, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai)
+bool blockchain_storage::create_block_template(block& b, const account_public_address& miner_address, wide_difficulty_type& diffic, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai)
 {
   size_t median_size;
   uint64_t already_generated_coins;
@@ -816,6 +878,36 @@ bool blockchain_storage::create_block_template(block& b, const account_public_ad
   }
   LOG_ERROR("Failed to create_block_template with " << 10 << " tries");
   return false;
+}
+//------------------------------------------------------------------
+bool blockchain_storage::print_transactions_statistics()
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  LOG_PRINT_L0("Started to collect transaction statistics, pleas wait...");
+  size_t total_count = 0;
+  size_t coinbase_count = 0;
+  size_t total_full_blob = 0;
+  size_t total_cropped_blob = 0;
+  for(auto tx_entry: m_transactions)
+  {
+    ++total_count;
+    if(is_coinbase(tx_entry.second.tx))
+      ++coinbase_count;
+    else
+    {
+      total_full_blob += get_object_blobsize<transaction>(tx_entry.second.tx);
+      transaction tx = tx_entry.second.tx;
+      tx.signatures.clear();
+      total_cropped_blob += get_object_blobsize<transaction>(tx);
+    }    
+  }
+  LOG_PRINT_L0("Done" << ENDL
+      << "total transactions: " << total_count << ENDL 
+      << "coinbase transactions: " << coinbase_count << ENDL 
+      << "avarage size of transaction: " << total_full_blob/(total_count-coinbase_count) << ENDL
+      << "avarage size of transaction without ring signatures: " << total_cropped_blob/(total_count-coinbase_count) << ENDL
+      );
+  return true;
 }
 //------------------------------------------------------------------
 bool blockchain_storage::complete_timestamps_vector(uint64_t start_top_height, std::vector<uint64_t>& timestamps)
@@ -933,7 +1025,7 @@ bool blockchain_storage::handle_alternative_block(const block& b, const crypto::
         alt_scratchppad_patch[ml.first] = crypto::xor_pod(alt_scratchppad_patch[ml.first], ml.second);
     }
 
-    difficulty_type current_diff = get_next_difficulty_for_alternative_chain(alt_chain, bei);
+    wide_difficulty_type current_diff = get_next_difficulty_for_alternative_chain(alt_chain, bei);
     CHECK_AND_ASSERT_MES(current_diff, false, "!!!!!!! DIFFICULTY OVERHEAD !!!!!!!");
     crypto::hash proof_of_work = null_hash;
     // POW
@@ -1096,14 +1188,77 @@ bool blockchain_storage::handle_get_objects(NOTIFY_REQUEST_GET_OBJECTS::request&
   return true;
 }
 //------------------------------------------------------------------
+bool blockchain_storage::get_transactions_daily_stat(uint64_t& daily_cnt, uint64_t& daily_volume)
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  daily_cnt = daily_volume = 0;
+  for(size_t i =  (m_blocks.size() > CURRENCY_BLOCK_PER_DAY ? m_blocks.size() - CURRENCY_BLOCK_PER_DAY:0 ); i!=m_blocks.size(); i++)
+  {
+    for(auto& h: m_blocks[i].bl.tx_hashes)
+    {
+      ++daily_cnt;
+      auto tx_it = m_transactions.find(h);
+      CHECK_AND_ASSERT_MES(tx_it != m_transactions.end(), false, "Wrong transaction hash "<<  h <<" in block on height " << i );
+      uint64_t am = 0;
+      bool r = get_inputs_money_amount(tx_it->second.tx, am);
+      CHECK_AND_ASSERT_MES(r, false, "failed to get_inputs_money_amount");
+      daily_volume += am;
+    }
+  }
+  return true;
+}
+//------------------------------------------------------------------
 uint64_t blockchain_storage::get_current_hashrate(size_t aprox_count)
 {
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
   if(m_blocks.size() <= aprox_count)
     return 0;
 
-  return  (m_blocks.back().cumulative_difficulty - m_blocks[m_blocks.size() - aprox_count].cumulative_difficulty)/
+  wide_difficulty_type w_hr = (m_blocks.back().cumulative_difficulty - m_blocks[m_blocks.size() - aprox_count].cumulative_difficulty)/
                               (m_blocks.back().bl.timestamp - m_blocks[m_blocks.size() - aprox_count].bl.timestamp);
+  return w_hr.convert_to<uint64_t>();
+}
+//------------------------------------------------------------------
+bool blockchain_storage::extport_scratchpad_to_file(const std::string& path)
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  export_scratchpad_file_header fh;
+  memset(&fh, 0, sizeof(fh));
+
+  fh.current_hi.prevhash = currency::get_block_hash(m_blocks.back().bl);
+  fh.current_hi.height = m_blocks.size()-1;
+  fh.scratchpad_size = m_scratchpad.size()*4;
+  
+  try
+  {
+
+    std::string tmp_path = path + ".tmp";
+    std::ofstream fstream;
+    fstream.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+    fstream.open(tmp_path, std::ios_base::binary | std::ios_base::out | std::ios_base::trunc);
+    fstream.write((const char*)&fh, sizeof(fh));
+    fstream.write((const char*)&m_scratchpad[0], m_scratchpad.size()*32);
+    fstream.close();
+
+    boost::filesystem::remove(path);
+    boost::filesystem::rename(tmp_path, path);
+
+    LOG_PRINT_L0("Scratchpad exported to " << path << ", " << (m_scratchpad.size()*32)/1024 << "kbytes" );
+    return true;
+  }
+  catch(const std::exception& e)
+  {
+    LOG_PRINT_L0("Failed to store scratchpad, error: " << e.what());
+    return false;
+  }
+
+  catch(...)
+  {
+    LOG_PRINT_L0("Failed to store scratchpad, unknown error" );
+    return false;
+  }
+
+  return true;
 }
 //------------------------------------------------------------------
 bool blockchain_storage::get_alternative_blocks(std::list<block>& blocks)
@@ -1133,6 +1288,12 @@ bool blockchain_storage::add_out_to_get_random_outs(std::vector<std::pair<crypto
     << amount_outs[i].second << " more than transaction outputs = " << tx_it->second.tx.vout.size() << ", for tx id = " << amount_outs[i].first);
   transaction& tx = tx_it->second.tx;
   CHECK_AND_ASSERT_MES(tx.vout[amount_outs[i].second].target.type() == typeid(txout_to_key), false, "unknown tx out type");
+
+  CHECK_AND_ASSERT_MES(tx_it->second.m_spent_flags.size() == tx.vout.size(), false, "internal error");
+
+  //do not use outputs that obviously spent for mixins
+  if(tx_it->second.m_spent_flags[amount_outs[i].second])
+    return false;
 
   //check if transaction is unlocked
   if(!is_tx_spendtime_unlocked(tx.unlock_time))
@@ -1173,8 +1334,7 @@ size_t blockchain_storage::find_end_of_allowed_index(const std::vector<std::pair
 }
 //------------------------------------------------------------------
 bool blockchain_storage::get_random_outs_for_amounts(const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::request& req, COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::response& res)
-{
-  srand(static_cast<unsigned int>(time(NULL)));
+{  
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
   BOOST_FOREACH(uint64_t amount, req.amounts)
   {
@@ -1197,7 +1357,7 @@ bool blockchain_storage::get_random_outs_for_amounts(const COMMAND_RPC_GET_RANDO
       size_t try_count = 0;
       for(uint64_t j = 0; j != req.outs_count && try_count < up_index_limit;)
       {
-        size_t i = rand()%up_index_limit;
+        size_t i = crypto::rand<size_t>()%up_index_limit;
         if(used.count(i))
           continue;
         bool added = add_out_to_get_random_outs(amount_outs, result_outs, amount, i, req.outs_count, req.use_forced_mix_outs);
@@ -1212,6 +1372,48 @@ bool blockchain_storage::get_random_outs_for_amounts(const COMMAND_RPC_GET_RANDO
         add_out_to_get_random_outs(amount_outs, result_outs, amount, i, req.outs_count, req.use_forced_mix_outs);
     }
   }
+  return true;
+}
+//------------------------------------------------------------------
+bool blockchain_storage::update_spent_tx_flags_for_input(uint64_t amount, uint64_t global_index, bool spent)
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  auto it = m_outputs.find(amount);
+  CHECK_AND_ASSERT_MES(it != m_outputs.end(), false, "Amount " << amount << " have not found during update_spent_tx_flags_for_input()");
+  CHECK_AND_ASSERT_MES(global_index < it->second.size(), false, "Global index" << global_index << " for amount " << amount << " bigger value than amount's vector size()=" << it->second.size());
+
+
+  auto tx_it = m_transactions.find(it->second[global_index].first);
+  CHECK_AND_ASSERT_MES(tx_it != m_transactions.end(), false, "Can't find transaction id: " << it->second[global_index].first << ", refferenced in amount=" << amount << ", global index=" << global_index);
+
+  CHECK_AND_ASSERT_MES(it->second[global_index].second < tx_it->second.m_spent_flags.size() , false, "Wrong input offset: " << it->second[global_index].second << " in transaction id: " << it->second[global_index].first << ", refferenced in amount=" << amount << ", global index=" << global_index);
+   
+  tx_it->second.m_spent_flags[it->second[global_index].second] = spent;
+  return true;
+}
+//------------------------------------------------------------------
+bool blockchain_storage::resync_spent_tx_flags()
+{
+  LOG_PRINT_L0("Started re-building spent tx outputs data...");
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+  for(auto& tx: m_transactions)
+  {
+    if(is_coinbase(tx.second.tx))
+      continue;
+
+    for(auto& in: tx.second.tx.vin)
+    {      
+      CHECKED_GET_SPECIFIC_VARIANT(in, txin_to_key, in_to_key, false);
+      if(in_to_key.key_offsets.size() != 1)
+        continue;
+
+      //direct spending
+      if(!update_spent_tx_flags_for_input(in_to_key.amount, in_to_key.key_offsets[0], true))
+        return false;
+
+    }
+  }
+  LOG_PRINT_L0("Finished re-building spent tx outputs data");
   return true;
 }
 //------------------------------------------------------------------
@@ -1262,7 +1464,7 @@ bool blockchain_storage::find_blockchain_supplement(const std::list<crypto::hash
   return true;
 }
 //------------------------------------------------------------------
-uint64_t blockchain_storage::block_difficulty(size_t i)
+wide_difficulty_type blockchain_storage::block_difficulty(size_t i)
 {
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
   CHECK_AND_ASSERT_MES(i < m_blocks.size(), false, "wrong block index i = " << i << " at blockchain_storage::block_difficulty()");
@@ -1514,13 +1716,38 @@ bool blockchain_storage::get_all_aliases(std::list<alias_info>& aliases)
   return true;
 }
 //------------------------------------------------------------------
+std::string blockchain_storage::get_alias_by_address(const account_public_address& addr)
+{
+  auto it = m_addr_to_alias.find(addr);
+  if (it != m_addr_to_alias.end())
+    return it->second;
+  
+  return "";
+}
+//------------------------------------------------------------------
 bool blockchain_storage::pop_alias_info(const alias_info& ai)
 {
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
   CHECK_AND_ASSERT_MES(ai.m_alias.size(), false, "empty name in pop_alias_info");
   aliases_container::mapped_type& alias_history = m_aliases[ai.m_alias];
   CHECK_AND_ASSERT_MES(alias_history.size(), false, "empty name list in pop_alias_info");
+  
+  auto it = m_addr_to_alias.find(alias_history.back().m_address);
+  if (it != m_addr_to_alias.end())
+  {
+    m_addr_to_alias.erase(it);
+  }
+  else
+  {
+    LOG_ERROR("In m_addr_to_alias not found " << get_account_address_as_str(alias_history.back().m_address));
+  }
+
   alias_history.pop_back();
+  if (alias_history.size())
+  {
+    m_addr_to_alias[alias_history.back().m_address] = ai.m_alias;
+  }
+  
   return true;
 }
 //------------------------------------------------------------------
@@ -1534,6 +1761,7 @@ bool blockchain_storage::put_alias_info(const alias_info& ai)
   {//adding new alias, check sat name is free
     CHECK_AND_ASSERT_MES(!alias_history.size(), false, "alias " << ai.m_alias << " already in use");
     alias_history.push_back(ai);
+    m_addr_to_alias[alias_history.back().m_address] = ai.m_alias;
   }else
   {
     //update procedure
@@ -1543,7 +1771,14 @@ bool blockchain_storage::put_alias_info(const alias_info& ai)
     bool r = crypto::check_signature(get_blob_hash(signed_buff), alias_history.back().m_address.m_spend_public_key, ai.m_sign);
     CHECK_AND_ASSERT_MES(r, false, "Failed to check signature, alias update failed");
     //update granted
+    auto it = m_addr_to_alias.find(alias_history.back().m_address);
+    if (it != m_addr_to_alias.end())
+      m_addr_to_alias.erase(it);
+    else
+      LOG_ERROR("Wromg m_addr_to_alias state: address not found " << get_account_address_as_str(alias_history.back().m_address));
+
     alias_history.push_back(ai);
+    m_addr_to_alias[alias_history.back().m_address] = ai.m_alias;
   }
   return true;
 }
@@ -1571,10 +1806,15 @@ bool blockchain_storage::add_transaction_from_block(const transaction& tx, const
 
   struct add_transaction_input_visitor: public boost::static_visitor<bool>
   {
+    blockchain_storage& m_bcs;
     key_images_container& m_spent_keys;
     const crypto::hash& m_tx_id;
     const crypto::hash& m_bl_id;
-    add_transaction_input_visitor(key_images_container& spent_keys, const crypto::hash& tx_id, const crypto::hash& bl_id):m_spent_keys(spent_keys), m_tx_id(tx_id), m_bl_id(bl_id)
+    add_transaction_input_visitor(blockchain_storage& bcs, key_images_container& spent_keys, const crypto::hash& tx_id, const crypto::hash& bl_id):
+      m_bcs(bcs),
+      m_spent_keys(spent_keys), 
+      m_tx_id(tx_id), 
+      m_bl_id(bl_id)
     {}
     bool operator()(const txin_to_key& in) const
     {
@@ -1586,6 +1826,19 @@ bool blockchain_storage::add_transaction_from_block(const transaction& tx, const
         LOG_PRINT_L0("tx with id: " << m_tx_id << " in block id: " << m_bl_id << " have input marked as spent with key image: " << ki << ", block declined");
         return false;
       }
+
+      if(in.key_offsets.size() == 1)
+      {
+        //direct spend detected
+        if(!m_bcs.update_spent_tx_flags_for_input(in.amount, in.key_offsets[0], true))
+        {
+          //internal error
+          LOG_PRINT_L0("Failed to  update_spent_tx_flags_for_input");
+          return false;
+        }
+      }
+
+
       return true;
     }
 
@@ -1596,7 +1849,7 @@ bool blockchain_storage::add_transaction_from_block(const transaction& tx, const
 
   BOOST_FOREACH(const txin_v& in, tx.vin)
   {
-    if(!boost::apply_visitor(add_transaction_input_visitor(m_spent_keys, tx_id, bl_id), in))
+    if(!boost::apply_visitor(add_transaction_input_visitor(*this, m_spent_keys, tx_id, bl_id), in))
     {
       LOG_ERROR("critical internal error: add_transaction_input_visitor failed. but key_images should be already checked");
       purge_transaction_keyimages_from_blockchain(tx, false);
@@ -1607,6 +1860,7 @@ bool blockchain_storage::add_transaction_from_block(const transaction& tx, const
   }
   transaction_chain_entry ch_e;
   ch_e.m_keeper_block_height = bl_height;
+  ch_e.m_spent_flags.resize(tx.vout.size(), false);
   ch_e.tx = tx;
   auto i_r = m_transactions.insert(std::pair<crypto::hash, transaction_chain_entry>(tx_id, ch_e));
   if(!i_r.second)
@@ -1686,8 +1940,14 @@ bool blockchain_storage::check_tx_inputs(const transaction& tx, const crypto::ha
       return false;
     }
 
-    CHECK_AND_ASSERT_MES(sig_index < tx.signatures.size(), false, "wrong transaction: not signature entry for input with index= " << sig_index);
-    if(!check_tx_input(in_to_key, tx_prefix_hash, tx.signatures[sig_index], pmax_used_block_height))
+    std::vector<crypto::signature> sig_stub;
+    const std::vector<crypto::signature>* psig = &sig_stub;
+    if (!m_is_in_checkpoint_zone)
+    {
+      CHECK_AND_ASSERT_MES(sig_index < tx.signatures.size(), false, "wrong transaction: not signature entry for input with index= " << sig_index);
+      psig = &tx.signatures[sig_index];
+    }    
+    if (!check_tx_input(in_to_key, tx_prefix_hash, *psig, pmax_used_block_height))
     {
       LOG_PRINT_L0("Failed to check ring signature for tx " << get_transaction_hash(tx));
       return false;
@@ -1695,7 +1955,10 @@ bool blockchain_storage::check_tx_inputs(const transaction& tx, const crypto::ha
 
     sig_index++;
   }
-  CHECK_AND_ASSERT_MES(tx.signatures.size() == sig_index, false, "tx signatures count differs from inputs");
+  if (!m_is_in_checkpoint_zone)
+  {
+    CHECK_AND_ASSERT_MES(tx.signatures.size() == sig_index, false, "tx signatures count differs from inputs");
+  }
 
   return true;
 }
@@ -1765,9 +2028,10 @@ bool blockchain_storage::check_tx_input(const txin_to_key& txin, const crypto::h
     LOG_PRINT_L0("Output keys for tx with amount = " << txin.amount << " and count indexes " << txin.key_offsets.size() << " returned wrong keys count " << output_keys.size());
     return false;
   }
-  CHECK_AND_ASSERT_MES(sig.size() == output_keys.size(), false, "internal error: tx signatures count=" << sig.size() << " mismatch with outputs keys count for inputs=" << output_keys.size());
   if(m_is_in_checkpoint_zone)
     return true;
+
+  CHECK_AND_ASSERT_MES(sig.size() == output_keys.size(), false, "internal error: tx signatures count=" << sig.size() << " mismatch with outputs keys count for inputs=" << output_keys.size());
   return crypto::check_ring_signature(tx_prefix_hash, txin.k_image, output_keys, sig.data());
 }
 //------------------------------------------------------------------
@@ -1832,10 +2096,28 @@ bool blockchain_storage::get_block_for_scratchpad_alt(uint64_t connection_height
   return true;
 }
 //------------------------------------------------------------------
+bool blockchain_storage::prune_aged_alt_blocks()
+{
+  CRITICAL_REGION_LOCAL(m_blockchain_lock);
+
+  uint64_t current_height = get_current_blockchain_height();
+
+  for(auto it = m_alternative_chains.begin(); it != m_alternative_chains.end();)
+  {
+    if( current_height > it->second.height && current_height - it->second.height > CURRENCY_ALT_BLOCK_LIVETIME_COUNT)
+      m_alternative_chains.erase(it++);
+    else
+      ++it;
+  }
+
+  return true;
+}
+//------------------------------------------------------------------
 bool blockchain_storage::handle_block_to_main_chain(const block& bl, const crypto::hash& id, block_verification_context& bvc)
 {
   TIME_MEASURE_START(block_processing_time);
   CRITICAL_REGION_LOCAL(m_blockchain_lock);
+
   if(bl.prev_id != get_top_block_id())
   {
     LOG_PRINT_L0("Block with id: " << id << ENDL
@@ -1855,7 +2137,7 @@ bool blockchain_storage::handle_block_to_main_chain(const block& bl, const crypt
 
   //check proof of work
   TIME_MEASURE_START(target_calculating_time);
-  difficulty_type current_diffic = get_difficulty_for_next_block();
+  wide_difficulty_type current_diffic = get_difficulty_for_next_block();
   CHECK_AND_ASSERT_MES(current_diffic, false, "!!!!!!!!! difficulty overhead !!!!!!!!!");
   TIME_MEASURE_FINISH(target_calculating_time);
   TIME_MEASURE_START(longhash_calculating_time);
@@ -1877,13 +2159,16 @@ bool blockchain_storage::handle_block_to_main_chain(const block& bl, const crypt
 
   if(m_checkpoints.is_in_checkpoint_zone(get_current_blockchain_height()))
   {
+    m_is_in_checkpoint_zone = true;
     if(!m_checkpoints.check_block(get_current_blockchain_height(), id))
     {
       LOG_ERROR("CHECKPOINT VALIDATION FAILED");
       bvc.m_verifivation_failed = true;
       return false;
     }
-  }
+  }else
+    m_is_in_checkpoint_zone = false;
+
   TIME_MEASURE_FINISH(longhash_calculating_time);
 
   if(!prevalidate_miner_transaction(bl, m_blocks.size()))
@@ -1917,6 +2202,13 @@ bool blockchain_storage::handle_block_to_main_chain(const block& bl, const crypt
       bvc.m_verifivation_failed = true;
       return false;
     }
+
+    //If we under checkpoints, ring signatures should be pruned    
+    if(m_is_in_checkpoint_zone)
+    {
+      tx.signatures.clear();
+    }
+
     if(!check_tx_inputs(tx))
     {
       LOG_PRINT_L0("Block with id: " << id  << "have at least one transaction (id: " << tx_id << ") with wrong inputs.");

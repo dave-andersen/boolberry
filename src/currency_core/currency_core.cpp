@@ -50,6 +50,11 @@ namespace currency
   {
   }
   //-----------------------------------------------------------------------------------------------
+  std::string core::get_config_folder()
+  {
+    return m_config_folder;
+  }
+  //-----------------------------------------------------------------------------------------------
   bool core::handle_command_line(const boost::program_options::variables_map& vm)
   {
     m_config_folder = command_line::get_arg(vm, command_line::arg_data_dir);
@@ -184,7 +189,7 @@ namespace currency
       return false;
     }
 
-    bool r = add_new_tx(tx, tx_hash, tx_prefixt_hash, tx_blob.size(), tvc, keeped_by_block);
+    bool r = add_new_tx(tx, tx_hash, tx_prefixt_hash, tvc, keeped_by_block);
     if(tvc.m_verifivation_failed)
     {LOG_PRINT_RED_L0("Transaction verification failed: " << tx_hash);}
     else if(tvc.m_verifivation_impossible)
@@ -291,7 +296,7 @@ namespace currency
     crypto::hash tx_prefix_hash = get_transaction_prefix_hash(tx);
     blobdata bl;
     t_serializable_object_to_blob(tx, bl);
-    return add_new_tx(tx, tx_hash, tx_prefix_hash, bl.size(), tvc, keeped_by_block);
+    return add_new_tx(tx, tx_hash, tx_prefix_hash, tvc, keeped_by_block);
   }
   //-----------------------------------------------------------------------------------------------
   size_t core::get_blockchain_total_transactions()
@@ -304,7 +309,7 @@ namespace currency
     return m_blockchain_storage.get_outs(amount, pkeys);
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::add_new_tx(const transaction& tx, const crypto::hash& tx_hash, const crypto::hash& tx_prefix_hash, size_t blob_size, tx_verification_context& tvc, bool keeped_by_block)
+  bool core::add_new_tx(const transaction& tx, const crypto::hash& tx_hash, const crypto::hash& tx_prefix_hash, tx_verification_context& tvc, bool keeped_by_block)
   {
     if(m_mempool.have_tx(tx_hash))
     {
@@ -318,10 +323,10 @@ namespace currency
       return true;
     }
 
-    return m_mempool.add_tx(tx, tx_hash, blob_size, tvc, keeped_by_block);
+    return m_mempool.add_tx(tx, tx_hash, tvc, keeped_by_block);
   }
   //-----------------------------------------------------------------------------------------------
-  bool core::get_block_template(block& b, const account_public_address& adr, difficulty_type& diffic, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai)
+  bool core::get_block_template(block& b, const account_public_address& adr, wide_difficulty_type& diffic, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai)
   {
     return m_blockchain_storage.create_block_template(b, adr, diffic, height, ex_nonce, vote_for_donation, ai);
   }
@@ -527,7 +532,8 @@ namespace currency
       m_starter_message_showed = true;
     }
 
-    m_store_blockchain_interval.do_call(boost::bind(&blockchain_storage::store_blockchain, &m_blockchain_storage));
+    m_store_blockchain_interval.do_call([this](){return m_blockchain_storage.store_blockchain();});
+    m_prune_alt_blocks_interval.do_call([this](){return m_blockchain_storage.prune_aged_alt_blocks();});
     m_miner.on_idle();
     m_mempool.on_idle();
     return true;

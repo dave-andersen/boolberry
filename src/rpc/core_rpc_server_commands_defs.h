@@ -8,12 +8,16 @@
 #include "currency_core/difficulty.h"
 #include "crypto/hash.h"
 #include "p2p/p2p_protocol_defs.h"
+#include "rpc/mining_protocol_defs.h"
+#include "storages/portable_storage_base.h"
 
 namespace currency
 {
   //-----------------------------------------------
-#define CORE_RPC_STATUS_OK     "OK"
-#define CORE_RPC_STATUS_BUSY   "BUSY"
+#define CORE_RPC_STATUS_OK          "OK"
+#define CORE_RPC_STATUS_BUSY        "BUSY"
+#define CORE_RPC_STATUS_NOT_FOUND   "NOT FOUND"
+#define CORE_RPC_STATUS_FAILED        "FAILED"
 
 
   struct alias_rpc_details_base
@@ -38,9 +42,7 @@ namespace currency
       KV_SERIALIZE(alias)
       KV_CHAIN_MAP(details)
     END_KV_SERIALIZE_MAP()
-
   };
-
 
   struct COMMAND_RPC_GET_HEIGHT
   {
@@ -115,7 +117,26 @@ namespace currency
       END_KV_SERIALIZE_MAP()
     };
   };
+  //-----------------------------------------------
+  struct COMMAND_RPC_GET_TX_POOL
+  {
+    struct request
+    {
+      BEGIN_KV_SERIALIZE_MAP()
+      END_KV_SERIALIZE_MAP()
+    };
 
+    struct response
+    {
+      std::list<blobdata> txs;  //transactions blobs
+      std::string status;
+
+      BEGIN_KV_SERIALIZE_MAP()
+        KV_SERIALIZE(txs)
+        KV_SERIALIZE(status)
+      END_KV_SERIALIZE_MAP()
+    };
+  };
   //-----------------------------------------------
   struct COMMAND_RPC_GET_TX_GLOBAL_OUTPUTS_INDEXES
   {
@@ -282,6 +303,8 @@ namespace currency
       uint64_t daemon_network_state;
       uint64_t synchronization_start_height;
       uint64_t max_net_seen_height;
+      uint64_t transactions_cnt_per_day;
+      uint64_t transactions_volume_per_day;
       nodetool::maintainers_info_external mi;
 
       BEGIN_KV_SERIALIZE_MAP()
@@ -303,6 +326,8 @@ namespace currency
         KV_SERIALIZE(daemon_network_state)
         KV_SERIALIZE(synchronization_start_height)
         KV_SERIALIZE(max_net_seen_height)
+        KV_SERIALIZE(transactions_cnt_per_day)
+        KV_SERIALIZE(transactions_volume_per_day)
         KV_SERIALIZE(mi)
       END_KV_SERIALIZE_MAP()
     };
@@ -362,7 +387,7 @@ namespace currency
       uint64_t reserve_size;       //max 255 bytes
       std::string wallet_address;
       alias_rpc_details alias_details;
-      bool dev_bounties_vote;
+      epee::serialization::storage_entry dev_bounties_vote;
 
       BEGIN_KV_SERIALIZE_MAP()
         KV_SERIALIZE(reserve_size)
@@ -541,6 +566,42 @@ namespace currency
     };
   };
 
+
+  struct COMMAND_RPC_GET_ALIASES_BY_ADDRESS
+  {
+
+    typedef std::string request;
+
+    struct response
+    {
+      std::string alias;
+      std::string status;
+
+      BEGIN_KV_SERIALIZE_MAP()
+        KV_SERIALIZE(alias)
+        KV_SERIALIZE(status)
+      END_KV_SERIALIZE_MAP()
+    };
+  };
+
+
+  struct COMMAND_RPC_GET_ADDENDUMS
+  {
+
+    typedef mining::height_info request;
+
+    struct response
+    {
+      std::string status;
+      std::list<mining::addendum> addms;
+
+
+      BEGIN_KV_SERIALIZE_MAP()
+        KV_SERIALIZE(status)
+        KV_SERIALIZE(addms)
+      END_KV_SERIALIZE_MAP()
+    };
+  };
 
 }
 

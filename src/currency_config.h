@@ -31,6 +31,7 @@
 #define CURRENCY_REWARD_BLOCKS_WINDOW                 400
 #define CURRENCY_BLOCK_GRANTED_FULL_REWARD_ZONE       30000 //size of block (bytes) after which reward for block calculated using block size
 #define CURRENCY_COINBASE_BLOB_RESERVED_SIZE          600
+#define CURRENCY_MAX_TRANSACTION_BLOB_SIZE            (CURRENCY_BLOCK_GRANTED_FULL_REWARD_ZONE - CURRENCY_COINBASE_BLOB_RESERVED_SIZE*2) 
 #define CURRENCY_DISPLAY_DECIMAL_POINT                12
 
 // COIN - number of smallest units in one coin
@@ -38,6 +39,8 @@
 #define DEFAULT_DUST_THRESHOLD                          ((uint64_t)1000000) // pow(10, 6)
 
 #define DEFAULT_FEE                                     ((uint64_t)1000000000) // pow(10, 9)
+#define TX_POOL_MINIMUM_FEE                             ((uint64_t)10000000) // pow(10, 7)
+
 
 
 #define ORPHANED_BLOCKS_MAX_COUNT                       100
@@ -49,6 +52,7 @@
 #define DIFFICULTY_CUT                                  60  // timestamps to cut after sorting
 #define DIFFICULTY_BLOCKS_COUNT                         (DIFFICULTY_WINDOW + DIFFICULTY_LAG)
 
+#define CURRENCY_BLOCK_PER_DAY                          ((60*60*24)/(DIFFICULTY_TARGET))
 
 #define CURRENCY_LOCKED_TX_ALLOWED_DELTA_SECONDS        (DIFFICULTY_TARGET * CURRENCY_LOCKED_TX_ALLOWED_DELTA_BLOCKS)
 #define CURRENCY_LOCKED_TX_ALLOWED_DELTA_BLOCKS         1
@@ -61,8 +65,9 @@
 #define CURRENCY_PROTOCOL_HOP_RELAX_COUNT               3      //value of hop, after which we use only announce of new block
 
 
+#define CURRENCY_ALT_BLOCK_LIVETIME_COUNT               (720*7)//one week
 #define CURRENCY_MEMPOOL_TX_LIVETIME                    86400 //seconds, one day
-#define CURRENCY_MEMPOOL_TX_FROM_ALT_BLOCK_LIVETIME     604800 //seconds, one week
+#define CURRENCY_MEMPOOL_TX_FROM_ALT_BLOCK_LIVETIME     (CURRENCY_ALT_BLOCK_LIVETIME_COUNT*DIFFICULTY_TARGET) //seconds, one week
 
 
 #ifndef TESTNET
@@ -129,5 +134,5 @@
 #define CURRENCY_BLOCKCHAINDATA_FILENAME                "blockchain.bin"
 #define CURRENCY_BLOCKCHAINDATA_TEMP_FILENAME           "blockchain.bin.tmp"
 #define P2P_NET_DATA_FILENAME                           "p2pstate.bin"
-#define MINER_CONFIG_FILE_NAME                          "miner_conf.json"
-
+#define MINER_CONFIG_FILENAME                           "miner_conf.json"
+#define GUI_CONFIG_FILENAME                             "gui_conf.json"

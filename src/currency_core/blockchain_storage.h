@@ -20,10 +20,13 @@
 #include "currency_protocol/currency_protocol_defs.h"
 #include "rpc/core_rpc_server_commands_defs.h"
 #include "difficulty.h"
+#include "common/difficulty_boost_serialization.h"
 #include "currency_core/currency_format_utils.h"
 #include "verification_context.h"
 #include "crypto/hash.h"
 #include "checkpoints.h"
+
+POD_MAKE_HASHABLE(currency, account_public_address);
 
 namespace currency
 {
@@ -38,8 +41,8 @@ namespace currency
     {
       transaction tx;
       uint64_t m_keeper_block_height;
-      size_t m_blob_size;
       std::vector<uint64_t> m_global_output_indexes;
+      std::vector<bool> m_spent_flags;
     };
 
     struct block_extended_info
@@ -47,7 +50,7 @@ namespace currency
       block   bl;
       uint64_t height;
       size_t block_cumulative_size;
-      difficulty_type cumulative_difficulty;
+      wide_difficulty_type cumulative_difficulty;
       uint64_t already_generated_coins;
       uint64_t already_donated_coins;
       uint64_t scratch_offset;
@@ -59,7 +62,8 @@ namespace currency
     bool init(const std::string& config_folder);
     bool deinit();
 
-    void set_checkpoints(checkpoints&& chk_pts) { m_checkpoints = chk_pts; }
+    void set_checkpoints(checkpoints&& chk_pts);
+    checkpoints& get_checkpoints() { return m_checkpoints; }
 
     //bool push_new_block();
     bool get_blocks(uint64_t start_offset, size_t count, std::list<block>& blocks, std::list<transaction>& txs);
@@ -86,10 +90,10 @@ namespace currency
     crypto::hash get_top_block_id();
     crypto::hash get_top_block_id(uint64_t& height);
     bool get_top_block(block& b);
-    difficulty_type get_difficulty_for_next_block();
+    wide_difficulty_type get_difficulty_for_next_block();
     bool add_new_block(const block& bl_, block_verification_context& bvc);
     bool reset_and_set_genesis_block(const block& b);
-    bool create_block_template(block& b, const account_public_address& miner_address, difficulty_type& di, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai);
+    bool create_block_template(block& b, const account_public_address& miner_address, wide_difficulty_type& di, uint64_t& height, const blobdata& ex_nonce, bool vote_for_donation, const alias_info& ai);
     bool have_block(const crypto::hash& id);
     size_t get_total_transactions();
     bool get_outs(uint64_t amount, std::list<crypto::public_key>& pkeys);
@@ -103,6 +107,7 @@ namespace currency
     bool get_backward_blocks_sizes(size_t from_height, std::vector<size_t>& sz, size_t count);
     bool get_tx_outputs_gindexs(const crypto::hash& tx_id, std::vector<uint64_t>& indexs);
     bool get_alias_info(const std::string& alias, alias_info_base& info);
+    std::string get_alias_by_address(const account_public_address& addr);
     bool get_all_aliases(std::list<alias_info>& aliases);
     uint64_t get_aliases_count();
     uint64_t get_scratchpad_size();
@@ -113,10 +118,16 @@ namespace currency
     bool check_tx_inputs(const transaction& tx, uint64_t& pmax_used_block_height, crypto::hash& max_used_block_id);
     uint64_t get_current_comulative_blocksize_limit();
     uint64_t get_current_hashrate(size_t aprox_count);
+    bool extport_scratchpad_to_file(const std::string& path);
+    bool print_transactions_statistics();
+    bool update_spent_tx_flags_for_input(uint64_t amount, uint64_t global_index, bool spent);
 
     bool is_storing_blockchain(){return m_is_blockchain_storing;}
-    uint64_t block_difficulty(size_t i);
-    bool copy_scratchpad(std::vector<crypto::hash>& scr);//TODO: not the best way, add later update method instead of full copy
+    wide_difficulty_type block_difficulty(size_t i);
+    bool copy_scratchpad(std::vector<crypto::hash>& dst);//TODO: not the best way, add later update method instead of full copy
+    bool copy_scratchpad(std::string& dst);
+    bool prune_aged_alt_blocks();
+    bool get_transactions_daily_stat(uint64_t& daily_cnt, uint64_t& daily_volume);
 
     template<class t_ids_container, class t_blocks_container, class t_missed_container>
     bool get_blocks(const t_ids_container& block_ids, t_blocks_container& blocks, t_missed_container& missed_bs)
@@ -173,7 +184,8 @@ namespace currency
     typedef std::unordered_map<crypto::hash, block> blocks_by_hash;
     typedef std::map<uint64_t, std::vector<std::pair<crypto::hash, size_t>>> outputs_container; //crypto::hash - tx hash, size_t - index of out in transaction
     typedef std::map<std::string, std::list<alias_info_base>> aliases_container; //alias can be address address address + view key
-
+    typedef std::unordered_map<account_public_address, std::string> address_to_aliases_container;
+    
     tx_memory_pool& m_tx_pool;
     critical_section m_blockchain_lock; // TODO: add here reader/writer lock
 
@@ -192,7 +204,9 @@ namespace currency
     blocks_ext_by_hash m_invalid_blocks;     // crypto::hash -> block_extended_info
     outputs_container m_outputs;
     aliases_container m_aliases;
+    address_to_aliases_container m_addr_to_alias;
     std::vector<crypto::hash> m_scratchpad;
+    uint64_t m_current_pruned_rs_height;
 
     std::string m_config_folder;
     checkpoints m_checkpoints;
@@ -201,6 +215,7 @@ namespace currency
 
     account_keys m_donations_account;
     account_keys m_royalty_account;
+
 
     bool switch_to_alternative_blockchain(std::list<blocks_ext_by_hash::iterator>& alt_chain);
     bool pop_block_from_blockchain();
@@ -211,7 +226,7 @@ namespace currency
     bool handle_block_to_main_chain(const block& bl, block_verification_context& bvc);
     bool handle_block_to_main_chain(const block& bl, const crypto::hash& id, block_verification_context& bvc);
     bool handle_alternative_block(const block& b, const crypto::hash& id, block_verification_context& bvc);
-    difficulty_type get_next_difficulty_for_alternative_chain(const std::list<blocks_ext_by_hash::iterator>& alt_chain, block_extended_info& bei);
+    wide_difficulty_type get_next_difficulty_for_alternative_chain(const std::list<blocks_ext_by_hash::iterator>& alt_chain, block_extended_info& bei);
     bool prevalidate_miner_transaction(const block& b, uint64_t height);
     bool validate_miner_transaction(const block& b, size_t cumulative_block_size, uint64_t fee, uint64_t& base_reward, uint64_t already_generated_coins, uint64_t already_donated_coins, uint64_t& donation_total);
     bool validate_transaction(const block& b, uint64_t height, const transaction& tx);
@@ -239,6 +254,10 @@ namespace currency
     bool validate_donations_value(uint64_t donation, uint64_t royalty);
     //uint64_t get_block_avr_donation_vote(const block& b);
     bool get_required_donations_value_for_next_block(uint64_t& don_am); //applicable only for each CURRENCY_DONATIONS_INTERVAL-th block
+    void fill_addr_to_alias_dict();
+    bool resync_spent_tx_flags();
+    bool prune_ring_signatures_if_need();
+    bool prune_ring_signatures(uint64_t height, uint64_t& transactions_pruned, uint64_t& signatures_pruned);
   };
 
 
@@ -246,12 +265,14 @@ namespace currency
   /*                                                                      */
   /************************************************************************/
 
-  #define CURRENT_BLOCKCHAIN_STORAGE_ARCHIVE_VER    22
+  #define CURRENT_BLOCKCHAIN_STORAGE_ARCHIVE_VER          27
+  #define CURRENT_TRANSACTION_CHAIN_ENTRY_ARCHIVE_VER     3
+  #define CURRENT_BLOCK_EXTENDED_INFO_ARCHIVE_VER         1
 
   template<class archive_t>
   void blockchain_storage::serialize(archive_t & ar, const unsigned int version)
   {
-    if(version < CURRENT_BLOCKCHAIN_STORAGE_ARCHIVE_VER)
+    if(version < 22)
       return;
     CHECK_PROJECT_NAME();
     CRITICAL_REGION_LOCAL(m_blockchain_lock);
@@ -259,17 +280,29 @@ namespace currency
     ar & m_blocks_index;
     ar & m_transactions;
     ar & m_spent_keys;
-    ar & m_alternative_chains;
+
+    //do not keep alternative blocks
+    if(version < 27)
+      ar & m_alternative_chains;
+
     ar & m_outputs;
     ar & m_invalid_blocks;
     ar & m_current_block_cumul_sz_limit;
     ar & m_aliases;
     ar & m_scratchpad;
-    /*serialization bug workaround*/
     
-    uint64_t total_check_count = m_blocks.size() + m_blocks_index.size() + m_transactions.size() + m_spent_keys.size() + m_alternative_chains.size() + m_outputs.size() + m_invalid_blocks.size() + m_current_block_cumul_sz_limit;
+
+    /*---- serialization bug workaround ----*/    
+    
+    /*serialization m_alternative_chains excluding*/
+    uint64_t total_check_count = 0;
+    if (archive_t::is_loading::value && version < 27)
+      total_check_count = m_blocks.size() + m_blocks_index.size() + m_transactions.size() + m_spent_keys.size() + m_alternative_chains.size() + m_outputs.size() + m_invalid_blocks.size() + m_current_block_cumul_sz_limit;
+    else
+      total_check_count = m_blocks.size() + m_blocks_index.size() + m_transactions.size() + m_spent_keys.size() + m_outputs.size() + m_invalid_blocks.size() + m_current_block_cumul_sz_limit;
+
     if(archive_t::is_saving::value)
-    {        
+    {
       ar & total_check_count;
     }else
     {
@@ -292,6 +325,27 @@ namespace currency
         throw std::runtime_error("Blockchain data corruption");
       }
     }
+
+    if(version < 25)
+    {
+      //re-sync spent flags
+      if(!resync_spent_tx_flags())
+      {
+        LOG_ERROR("resync_spent_tx_flags() failed.");
+        throw std::runtime_error("resync_spent_tx_flags() failed.");
+      }
+    }
+
+    if(version < 26)
+      m_current_pruned_rs_height = 0;
+    else 
+      ar & m_current_pruned_rs_height;
+    
+    if(archive_t::is_loading::value)
+    {
+      prune_ring_signatures_if_need();
+    }
+
 
 
     LOG_PRINT_L2("Blockchain storage:" << ENDL << 
@@ -356,4 +410,8 @@ namespace currency
 
 
 
+
 BOOST_CLASS_VERSION(currency::blockchain_storage, CURRENT_BLOCKCHAIN_STORAGE_ARCHIVE_VER)
+BOOST_CLASS_VERSION(currency::blockchain_storage::transaction_chain_entry, CURRENT_TRANSACTION_CHAIN_ENTRY_ARCHIVE_VER)
+BOOST_CLASS_VERSION(currency::blockchain_storage::block_extended_info, CURRENT_BLOCK_EXTENDED_INFO_ARCHIVE_VER)
+  
